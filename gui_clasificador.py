@@ -2,16 +2,17 @@ import sys
 import cv2
 import numpy as np
 import tensorflow as tf
-from PyQt5.QtWidgets import QApplication, QMainWindow, QLabel, QVBoxLayout, QHBoxLayout, QWidget, QPushButton, QFrame, QCheckBox
+import serial
+import time
+from PyQt5.QtWidgets import QApplication, QMainWindow, QLabel, QVBoxLayout, QHBoxLayout, QWidget, QPushButton, QFrame
 from PyQt5.QtGui import QImage, QPixmap, QFont
 from PyQt5.QtCore import QTimer, Qt
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from scipy.spatial import distance as dist
 
-# (La clase CentroidTracker y la configuración inicial no cambian)
-# ... (código del tracker, configuración de constantes y carga del modelo) ...
+# --- CLASE Rastreador de Objetos (para IDs estables) ---
 class CentroidTracker:
-    def __init__(self, maxDisappeared=50):
+    def __init__(self, maxDisappeared=30):
         self.nextObjectID = 0
         self.objects = OrderedDict()
         self.disappeared = OrderedDict()
@@ -21,8 +22,8 @@ class CentroidTracker:
         self.disappeared[self.nextObjectID] = 0
         self.nextObjectID += 1
     def deregister(self, objectID):
-        del self.objects[objectID]
-        del self.disappeared[objectID]
+        if objectID in self.objects: del self.objects[objectID]
+        if objectID in self.disappeared: del self.disappeared[objectID]
     def update(self, rects):
         if len(rects) == 0:
             for objectID in list(self.disappeared.keys()):
@@ -34,20 +35,20 @@ class CentroidTracker:
             cX = int((startX + endX) / 2.0); cY = int((startY + endY) / 2.0)
             inputCentroids[i] = (cX, cY)
         if len(self.objects) == 0:
-            for i in range(0, len(inputCentroids)): self.register(inputCentroids[i])
+            for i in range(len(inputCentroids)): self.register(inputCentroids[i])
         else:
             objectIDs = list(self.objects.keys()); objectCentroids = list(self.objects.values())
             D = dist.cdist(np.array(objectCentroids), inputCentroids)
             rows = D.min(axis=1).argsort(); cols = D.argmin(axis=1)[rows]
-            usedRows = set(); usedCols = set()
+            usedRows, usedCols = set(), set()
             for (row, col) in zip(rows, cols):
                 if row in usedRows or col in usedCols: continue
                 objectID = objectIDs[row]
                 self.objects[objectID] = inputCentroids[col]
                 self.disappeared[objectID] = 0
                 usedRows.add(row); usedCols.add(col)
-            unusedRows = set(range(0, D.shape[0])).difference(usedRows)
-            unusedCols = set(range(0, D.shape[1])).difference(usedCols)
+            unusedRows = set(range(D.shape[0])).difference(usedRows)
+            unusedCols = set(range(D.shape[1])).difference(usedCols)
             if D.shape[0] >= D.shape[1]:
                 for row in unusedRows:
                     objectID = objectIDs[row]
@@ -57,161 +58,196 @@ class CentroidTracker:
                 for col in unusedCols: self.register(inputCentroids[col])
         return self.objects
 
-PIXELES_POR_MM = 3.2
+# --- CONFIGURACIÓN GENERAL ---
+PIXELES_POR_MM = 3.2 
 MANZANA_PEQUENA_MM = 65
 MANZANA_MEDIANA_MM = 80
+PUERTO_ARDUINO = 'COM9'
+CONFIDENCE_THRESHOLD = 0.5
+NMS_THRESHOLD = 0.3
+
+# --- CARGA DE MODELOS ---
 model_loaded = False
 try:
-    model = tf.keras.models.load_model('modelo_manzanas.h5')
+    classification_model = tf.keras.models.load_model('modelo_manzanas.h5')
     CLASS_NAMES = ['intermedia', 'madura', 'verde']
-    IMG_HEIGHT = 224
-    IMG_WIDTH = 224
+    IMG_HEIGHT, IMG_WIDTH = 224, 224
     model_loaded = True
+    print("Modelo de clasificación cargado.")
 except IOError:
-    print("Error: No se encontró 'modelo_manzanas.h5'.")
+    print("ADVERTENCIA: No se pudo cargar 'modelo_manzanas.h5'.")
 
+try:
+    net = cv2.dnn.readNet("yolov3.weights", "yolov3.cfg")
+    layer_names = net.getLayerNames()
+    output_layers = [layer_names[i - 1] for i in net.getUnconnectedOutLayers()]
+    with open("coco.names", "r") as f:
+        classes = [line.strip() for line in f.readlines()]
+    print("Modelo YOLOv3 cargado correctamente.")
+except Exception as e:
+    print(f"Error fatal al cargar YOLOv3: {e}")
+    sys.exit()
 
 class ClasificadorApp(QMainWindow):
     def __init__(self):
         super().__init__()
         self.tracker = CentroidTracker()
-        self.setWindowTitle("Clasificador de Manzanas")
-        self.setGeometry(100, 100, 1000, 600)
-        self.setStyleSheet("QWidget { background-color: #2E2E2E; color: #FFFFFF; } /* ... (resto del estilo) ... */")
+        self.objetos_posicion_previa = {}
+        self.medidas_tamano = {}
+        self.arduino = None
+        self.initUI()
+        self.initCamera()
+        self.initArduino()
+
+    def initUI(self):
+        self.setWindowTitle("Clasificador de Manzanas v2.2 (Final)")
+        self.setGeometry(100, 100, 1200, 700)
+        self.setStyleSheet("QWidget { background-color: #2E2E2E; color: #E0E0E0; } QLabel { color: #E0E0E0; } QPushButton { background-color: #4A4A4A; border: 1px solid #6A6A6A; padding: 8px; border-radius: 4px; } QPushButton:hover { background-color: #5A5A5A; } QFrame { background-color: #4A4A4A; }")
         
-        # --- NUEVO: Variables para controlar la visualización ---
-        self.show_tamano = True
-        self.show_color = True
-        self.show_madurez = True
-        
-        # --- (La configuración del layout principal no cambia) ---
-        central_widget = QWidget()
-        self.setCentralWidget(central_widget)
+        central_widget = QWidget(); self.setCentralWidget(central_widget)
         main_layout = QHBoxLayout(central_widget)
-        self.video_label = QLabel(self)
-        main_layout.addWidget(self.video_label, 7)
-        control_panel_layout = QVBoxLayout()
-        main_layout.addLayout(control_panel_layout, 3)
         
-        title_label = QLabel("Resultados de Clasificación")
-        title_label.setFont(QFont("Arial", 16, QFont.Bold))
-        control_panel_layout.addWidget(title_label)
+        self.video_label = QLabel("Presiona 'Iniciar'"); self.video_label.setAlignment(Qt.AlignCenter); self.video_label.setFont(QFont("Arial", 14)); main_layout.addWidget(self.video_label, 7)
+        control_panel_layout = QVBoxLayout(); main_layout.addLayout(control_panel_layout, 3)
         
-        # --- NUEVO: Layout y Checkboxes para filtros ---
-        checkbox_layout = QHBoxLayout()
-        checkbox_layout.addWidget(QLabel("Mostrar:"))
-        self.check_tamano = QCheckBox("Tamaño")
-        self.check_tamano.setChecked(True)
-        self.check_tamano.stateChanged.connect(self.update_display_flags)
-        checkbox_layout.addWidget(self.check_tamano)
+        title_label = QLabel("Panel de Control"); title_label.setFont(QFont("Arial", 18, QFont.Bold)); title_label.setAlignment(Qt.AlignCenter); control_panel_layout.addWidget(title_label)
+        
+        self.results_display = QLabel("Esperando inicio..."); self.results_display.setFont(QFont("Arial", 12)); self.results_display.setAlignment(Qt.AlignTop | Qt.AlignLeft); control_panel_layout.addWidget(self.results_display); control_panel_layout.addStretch()
+        
+        button_layout = QHBoxLayout(); self.toggle_button = QPushButton("Iniciar", self); self.toggle_button.clicked.connect(self.toggle_camera); self.quit_button = QPushButton("Salir", self); self.quit_button.clicked.connect(self.close); button_layout.addWidget(self.toggle_button); button_layout.addWidget(self.quit_button); control_panel_layout.addLayout(button_layout)
+        
+    def initCamera(self):
+        self.cap = cv2.VideoCapture(0)
+        self.timer = QTimer()
+        self.timer.timeout.connect(self.update_frame)
+        self.is_running = False
+        
+    def initArduino(self):
+        try:
+            self.arduino = serial.Serial(PUERTO_ARDUINO, 9600, timeout=1)
+            time.sleep(2)
+            print(f"Conexión con Arduino en {PUERTO_ARDUINO} establecida.")
+        except Exception as e:
+            print(f"ADVERTENCIA: No se pudo conectar con Arduino. {e}")
+            self.arduino = None
 
-        self.check_color = QCheckBox("Color")
-        self.check_color.setChecked(True)
-        self.check_color.stateChanged.connect(self.update_display_flags)
-        checkbox_layout.addWidget(self.check_color)
-        
-        self.check_madurez = QCheckBox("Madurez")
-        self.check_madurez.setChecked(True)
-        self.check_madurez.stateChanged.connect(self.update_display_flags)
-        checkbox_layout.addWidget(self.check_madurez)
-        
-        control_panel_layout.addLayout(checkbox_layout)
-        
-        # (El resto del panel de control no cambia)
-        line = QFrame(); line.setFrameShape(QFrame.HLine); control_panel_layout.addWidget(line)
-        self.results_display = QLabel("Presiona 'Iniciar'"); self.results_display.setFont(QFont("Arial", 12)); self.results_display.setAlignment(Qt.AlignTop | Qt.AlignLeft)
-        control_panel_layout.addWidget(self.results_display)
-        control_panel_layout.addStretch()
-        button_layout = QHBoxLayout()
-        self.toggle_button = QPushButton("Iniciar", self); self.toggle_button.clicked.connect(self.toggle_camera)
-        self.quit_button = QPushButton("Salir", self); self.quit_button.clicked.connect(self.close)
-        button_layout.addWidget(self.toggle_button); button_layout.addWidget(self.quit_button)
-        control_panel_layout.addLayout(button_layout)
-        
-        self.cap = cv2.VideoCapture(0); self.timer = QTimer(); self.timer.timeout.connect(self.update_frame); self.is_running = False
-
-    # --- NUEVA FUNCIÓN: Para actualizar las banderas de visualización ---
-    def update_display_flags(self):
-        self.show_tamano = self.check_tamano.isChecked()
-        self.show_color = self.check_color.isChecked()
-        self.show_madurez = self.check_madurez.isChecked()
-        
     def toggle_camera(self):
-        # (Sin cambios)
         if not self.is_running:
+            if not self.cap.isOpened(): self.cap.open(0)
             self.timer.start(30); self.toggle_button.setText("Detener"); self.is_running = True
         else:
             self.timer.stop(); self.toggle_button.setText("Iniciar"); self.is_running = False
+            self.video_label.setText("Cámara detenida.")
 
     def update_frame(self):
         ret, frame = self.cap.read()
         if not ret: return
+
         output_frame = frame.copy()
-        
-        # (El código de detección y seguimiento no cambia)
+        h, w, _ = frame.shape
         hsv_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-        limite_bajo = np.array([0, 50, 50]); limite_alto = np.array([180, 255, 255])
-        mascara = cv2.inRange(hsv_frame, limite_bajo, limite_alto)
-        contornos, _ = cv2.findContours(mascara, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
-        rects_y_contornos = []
-        for c in contornos:
-            if cv2.contourArea(c) > 5000:
-                x, y, w, h = cv2.boundingRect(c); rects_y_contornos.append(((x, y, x + w, y + h), c))
-        rects = [rc[0] for rc in rects_y_contornos]
-        objects = self.tracker.update(rects)
+        
+        linea_y = h * 2 // 3
+        cv2.line(output_frame, (0, linea_y), (w, linea_y), (0, 0, 255), 2)
+
+        blob = cv2.dnn.blobFromImage(frame, 0.00392, (416, 416), (0, 0, 0), True, crop=False)
+        net.setInput(blob)
+        outs = net.forward(output_layers)
+
+        boxes, confidences = [], []
+        for out in outs:
+            for detection in out:
+                scores = detection[5:]
+                class_id = np.argmax(scores)
+                confidence = scores[class_id]
+                if classes[class_id] == "apple" and confidence > CONFIDENCE_THRESHOLD:
+                    center_x, center_y = int(detection[0] * w), int(detection[1] * h)
+                    w_box, h_box = int(detection[2] * w), int(detection[3] * h)
+                    x, y = int(center_x - w_box / 2), int(center_y - h_box / 2)
+                    boxes.append([x, y, w_box, h_box])
+                    confidences.append(float(confidence))
+
+        indexes = cv2.dnn.NMSBoxes(boxes, confidences, CONFIDENCE_THRESHOLD, NMS_THRESHOLD)
+        
+        rects = [boxes[i] for i in indexes.flatten()] if len(indexes) > 0 else []
+        objects = self.tracker.update([ (x, y, x + w_box, y + h_box) for (x, y, w_box, h_box) in rects ])
         
         all_results_text = []
         for (objectID, centroid) in objects.items():
-            for (rect, contorno) in rects_y_contornos:
-                (x, y, ex, ey) = rect
-                if centroid[0] > x and centroid[0] < ex and centroid[1] > y and centroid[1] < ey:
-                    w, h = ex - x, ey - y
-                    # (Toda la lógica de clasificación no cambia)
-                    ancho_real_mm = w / PIXELES_POR_MM
+            for rect in rects:
+                x, y, w_box, h_box = rect
+                if centroid[0] > x and centroid[0] < x + w_box and centroid[1] > y and centroid[1] < y + h_box:
+                    x, y = max(0, x), max(0, y)
+                    
+                    ancho_real_mm = w_box / PIXELES_POR_MM
+                    if objectID not in self.medidas_tamano:
+                        self.medidas_tamano[objectID] = deque(maxlen=10)
+                    self.medidas_tamano[objectID].append(ancho_real_mm)
+                    ancho_promedio_mm = np.mean(self.medidas_tamano[objectID])
+                    
                     clasificacion_tamano = "Grande"
-                    if ancho_real_mm < MANZANA_PEQUENA_MM: clasificacion_tamano = "Pequena"
-                    elif ancho_real_mm < MANZANA_MEDIANA_MM: clasificacion_tamano = "Mediana"
-                    mascara_color = np.zeros(frame.shape[:2], dtype="uint8")
-                    cv2.drawContours(mascara_color, [contorno], -1, 255, -1)
-                    hue = cv2.mean(hsv_frame, mask=mascara_color)[0]
+                    if ancho_promedio_mm < MANZANA_PEQUENA_MM: clasificacion_tamano = "Pequena"
+                    elif ancho_promedio_mm < MANZANA_MEDIANA_MM: clasificacion_tamano = "Mediana"
+                    
+                    mask_forma = np.zeros(hsv_frame.shape[:2], dtype="uint8")
+                    cv2.rectangle(mask_forma, (x, y), (x + w_box, y + h_box), 255, -1)
+                    mask_color_valido = cv2.inRange(hsv_frame, np.array([0, 70, 50]), np.array([180, 255, 255]))
+                    mask_final = cv2.bitwise_and(mask_forma, mask_color_valido)
+                    
+                    hue_promedio = -1
+                    if np.any(mask_final):
+                        hue_promedio = cv2.mean(hsv_frame, mask=mask_final)[0]
+                    
                     clasificacion_color = "No definido"
-                    if 0 <= hue <= 15: clasificacion_color = "Roja"
-                    elif 38 <= hue <= 50: clasificacion_color = "Verde"
-                    elif 20 <= hue <= 35: clasificacion_color = "Amarilla"
+                    if 0 <= hue_promedio <= 18 or 170 <= hue_promedio <= 180: clasificacion_color = "Roja"
+                    elif 35 <= hue_promedio <= 75: clasificacion_color = "Verde"
+                    elif 19 <= hue_promedio <= 34: clasificacion_color = "Amarilla"
+                    
                     clasificacion_madurez = "N/A"; confianza = 0
                     if model_loaded:
-                        roi = frame[y:ey, x:ex]; img_resized = cv2.resize(roi, (IMG_HEIGHT, IMG_WIDTH))
-                        img_array = tf.keras.utils.img_to_array(img_resized); img_batch = np.expand_dims(img_array, axis=0)
-                        prediction = model.predict(img_batch, verbose=0); score = tf.nn.softmax(prediction[0])
-                        clasificacion_madurez = CLASS_NAMES[np.argmax(score)]; confianza = 100 * np.max(score)
+                        roi = frame[y:y+h_box, x:x+w_box]
+                        if roi.size > 0:
+                            img_resized = cv2.resize(roi, (IMG_HEIGHT, IMG_WIDTH))
+                            img_array = tf.keras.utils.img_to_array(img_resized); img_batch = np.expand_dims(img_array, axis=0)
+                            prediction = classification_model.predict(img_batch, verbose=0); score = tf.nn.softmax(prediction[0])
+                            clasificacion_madurez = CLASS_NAMES[np.argmax(score)]; confianza = 100 * np.max(score)
 
-                    # --- NUEVO: Construcción dinámica del texto ---
-                    resultado_partes = [f"<b>Manzana {objectID}</b>"]
-                    if self.show_tamano:
-                        resultado_partes.append(f"&nbsp;&nbsp;Tamaño: {clasificacion_tamano} ({ancho_real_mm:.1f} mm)")
-                    if self.show_color:
-                        resultado_partes.append(f"&nbsp;&nbsp;Color: {clasificacion_color}")
-                    if self.show_madurez and model_loaded:
-                        resultado_partes.append(f"&nbsp;&nbsp;Madurez: {clasificacion_madurez} ({confianza:.1f}%)")
-                    
-                    all_results_text.append("<br>".join(resultado_partes))
-                    
-                    cv2.rectangle(output_frame, (x, y), (ex, ey), (0, 255, 0), 2)
-                    cv2.putText(output_frame, f"ID: {objectID}", (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                    resultado_manzana = (f"<b>Manzana {objectID}</b><br>"
+                                         f"&nbsp;&nbsp;Tamaño: {clasificacion_tamano} ({ancho_promedio_mm:.1f} mm)<br>"
+                                         f"&nbsp;&nbsp;Color: {clasificacion_color}<br>"
+                                         f"&nbsp;&nbsp;Madurez: {clasificacion_madurez} ({confianza:.1f}%)")
+                    all_results_text.append(resultado_manzana)
+
+                    cv2.rectangle(output_frame, (x, y), (x + w_box, y + h_box), (0, 255, 0), 2)
+                    cv2.putText(output_frame, f"ID {objectID}", (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+
+                    posicion_previa = self.objetos_posicion_previa.get(objectID, 0)
+                    if posicion_previa < linea_y and centroid[1] >= linea_y:
+                        if self.arduino:
+                            comando = clasificacion_madurez[0].upper()
+                            self.arduino.write(comando.encode())
+                            print(f"--> ¡CRUCE! Manzana {objectID} ({clasificacion_madurez}). Orden enviada: {comando}")
                     break
         
+        self.objetos_posicion_previa = {obj_id: center[1] for obj_id, center in objects.items()}
+
         if all_results_text: self.results_display.setText("<br><br>".join(all_results_text))
         else: self.results_display.setText("No se detectan manzanas")
         
-        # (El resto no cambia)
         rgb_image = cv2.cvtColor(output_frame, cv2.COLOR_BGR2RGB); h, w, ch = rgb_image.shape; bytes_per_line = ch * w
         qt_image = QImage(rgb_image.data, w, h, bytes_per_line, QImage.Format_RGB888)
         pixmap = QPixmap.fromImage(qt_image)
         self.video_label.setPixmap(pixmap.scaled(self.video_label.width(), self.video_label.height(), Qt.KeepAspectRatio))
 
     def closeEvent(self, event):
-        # (Sin cambios)
-        self.timer.stop(); self.cap.release(); super().closeEvent(event)
+        self.timer.stop()
+        self.cap.release()
+        if self.arduino: self.arduino.close()
+        super().closeEvent(event)
 
 if __name__ == '__main__':
-    app = QApplication(sys.argv); main_window = ClasificadorApp(); main_window.show(); sys.exit(app.exec_())
+    app = QApplication(sys.argv)
+    main_window = ClasificadorApp()
+    main_window.show()
+    sys.exit(app.exec_())
+
