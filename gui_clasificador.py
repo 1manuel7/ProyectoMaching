@@ -94,13 +94,14 @@ class ClasificadorApp(QMainWindow):
         self.tracker = CentroidTracker()
         self.objetos_posicion_previa = {}
         self.medidas_tamano = {}
+        self.predicciones_recientes = {} # Para estabilizar la predicción de madurez
         self.arduino = None
         self.initUI()
         self.initCamera()
         self.initArduino()
 
     def initUI(self):
-        self.setWindowTitle("Clasificador de Manzanas v2.2 (Final)")
+        self.setWindowTitle("Clasificador de Manzanas v2.3 (Estable)")
         self.setGeometry(100, 100, 1200, 700)
         self.setStyleSheet("QWidget { background-color: #2E2E2E; color: #E0E0E0; } QLabel { color: #E0E0E0; } QPushButton { background-color: #4A4A4A; border: 1px solid #6A6A6A; padding: 8px; border-radius: 4px; } QPushButton:hover { background-color: #5A5A5A; } QFrame { background-color: #4A4A4A; }")
         
@@ -179,9 +180,9 @@ class ClasificadorApp(QMainWindow):
                 if centroid[0] > x and centroid[0] < x + w_box and centroid[1] > y and centroid[1] < y + h_box:
                     x, y = max(0, x), max(0, y)
                     
+                    # Medición de tamaño estable
                     ancho_real_mm = w_box / PIXELES_POR_MM
-                    if objectID not in self.medidas_tamano:
-                        self.medidas_tamano[objectID] = deque(maxlen=10)
+                    if objectID not in self.medidas_tamano: self.medidas_tamano[objectID] = deque(maxlen=10)
                     self.medidas_tamano[objectID].append(ancho_real_mm)
                     ancho_promedio_mm = np.mean(self.medidas_tamano[objectID])
                     
@@ -189,28 +190,36 @@ class ClasificadorApp(QMainWindow):
                     if ancho_promedio_mm < MANZANA_PEQUENA_MM: clasificacion_tamano = "Pequena"
                     elif ancho_promedio_mm < MANZANA_MEDIANA_MM: clasificacion_tamano = "Mediana"
                     
+                    # Medición de color robusta
                     mask_forma = np.zeros(hsv_frame.shape[:2], dtype="uint8")
                     cv2.rectangle(mask_forma, (x, y), (x + w_box, y + h_box), 255, -1)
                     mask_color_valido = cv2.inRange(hsv_frame, np.array([0, 70, 50]), np.array([180, 255, 255]))
                     mask_final = cv2.bitwise_and(mask_forma, mask_color_valido)
                     
                     hue_promedio = -1
-                    if np.any(mask_final):
-                        hue_promedio = cv2.mean(hsv_frame, mask=mask_final)[0]
+                    if np.any(mask_final): hue_promedio = cv2.mean(hsv_frame, mask=mask_final)[0]
                     
                     clasificacion_color = "No definido"
                     if 0 <= hue_promedio <= 18 or 170 <= hue_promedio <= 180: clasificacion_color = "Roja"
                     elif 35 <= hue_promedio <= 75: clasificacion_color = "Verde"
                     elif 19 <= hue_promedio <= 34: clasificacion_color = "Amarilla"
                     
-                    clasificacion_madurez = "N/A"; confianza = 0
+                    # Clasificación de Madurez Estable
+                    clasificacion_madurez, confianza = "Analizando...", 0
                     if model_loaded:
                         roi = frame[y:y+h_box, x:x+w_box]
                         if roi.size > 0:
                             img_resized = cv2.resize(roi, (IMG_HEIGHT, IMG_WIDTH))
                             img_array = tf.keras.utils.img_to_array(img_resized); img_batch = np.expand_dims(img_array, axis=0)
                             prediction = classification_model.predict(img_batch, verbose=0); score = tf.nn.softmax(prediction[0])
-                            clasificacion_madurez = CLASS_NAMES[np.argmax(score)]; confianza = 100 * np.max(score)
+                            
+                            pred_actual = CLASS_NAMES[np.argmax(score)]
+                            if objectID not in self.predicciones_recientes: self.predicciones_recientes[objectID] = deque(maxlen=5)
+                            self.predicciones_recientes[objectID].append(pred_actual)
+                            
+                            if len(self.predicciones_recientes[objectID]) == 5:
+                                clasificacion_madurez = max(set(self.predicciones_recientes[objectID]), key=list(self.predicciones_recientes[objectID]).count)
+                                confianza = 100 * np.max(score)
 
                     resultado_manzana = (f"<b>Manzana {objectID}</b><br>"
                                          f"&nbsp;&nbsp;Tamaño: {clasificacion_tamano} ({ancho_promedio_mm:.1f} mm)<br>"
@@ -223,7 +232,7 @@ class ClasificadorApp(QMainWindow):
 
                     posicion_previa = self.objetos_posicion_previa.get(objectID, 0)
                     if posicion_previa < linea_y and centroid[1] >= linea_y:
-                        if self.arduino:
+                        if self.arduino and clasificacion_madurez != "Analizando...":
                             comando = clasificacion_madurez[0].upper()
                             self.arduino.write(comando.encode())
                             print(f"--> ¡CRUCE! Manzana {objectID} ({clasificacion_madurez}). Orden enviada: {comando}")
