@@ -13,7 +13,7 @@ IMG_WIDTH = 224
 BATCH_SIZE = 32
 DATASET_DIR = 'dataset'
 EPOCHS_FASE_1 = 15
-EPOCHS_FASE_2 = 10 # Épocas adicionales para el ajuste fino
+EPOCHS_FASE_2 = 15 # AUMENTAMOS LAS ÉPOCAS DE AJUSTE FINO
 TOTAL_EPOCHS = EPOCHS_FASE_1 + EPOCHS_FASE_2
 
 # --- AUMENTACIÓN DE DATOS ---
@@ -51,7 +51,6 @@ num_classes = len(train_generator.class_indices)
 print(f"Clases detectadas: {train_generator.class_indices}")
 
 # --- CÁLCULO DE PESOS DE CLASE (CLASS WEIGHTS) ---
-class_labels = list(train_generator.class_indices.keys())
 class_indices = train_generator.classes
 class_weights = compute_class_weight(class_weight='balanced', classes=np.unique(class_indices), y=class_indices)
 class_weights_dict = dict(enumerate(class_weights))
@@ -84,25 +83,26 @@ history = model.fit(
 # --- FASE 2: AJUSTE FINO (FINE-TUNING) ---
 print("\n--- INICIANDO FASE 2: AJUSTE FINO (FINE-TUNING) ---")
 base_model.trainable = True
-for layer in base_model.layers[:-40]:
+# AJUSTE: DESCONGELAMOS MÁS CAPAS (las últimas 55) para un aprendizaje más profundo
+for layer in base_model.layers[:-55]:
     layer.trainable = False
 
-model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=0.0001),
+model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=0.0001), # Tasa de aprendizaje baja
               loss='categorical_crossentropy',
               metrics=['accuracy'])
 
-# CORRECCIÓN: Se especifica el número total de épocas para que el entrenamiento continúe
 history_fine = model.fit(
     train_generator,
     epochs=TOTAL_EPOCHS,
     validation_data=validation_generator,
-    initial_epoch=history.epoch[-1] + 1, # Continuamos desde la siguiente a la última época
+    initial_epoch=history.epoch[-1] + 1,
     class_weight=class_weights_dict
 )
 
 # Guardar el modelo final
 model.save('modelo_manzanas.h5')
-print("\n¡Entrenamiento con Ajuste Fino completado! Modelo guardado como 'modelo_manzanas.h5'")
+print("\n¡Entrenamiento Definitivo completado! Modelo guardado como 'modelo_manzanas.h5'")
+
 
 # --- VISUALIZACIÓN DE RESULTADOS ---
 acc = history.history['accuracy'] + history_fine.history['accuracy']

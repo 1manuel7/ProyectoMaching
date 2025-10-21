@@ -17,7 +17,7 @@ for categoria in CATEGORIAS:
         os.makedirs(path)
         print(f"Carpeta creada: {path}")
 
-cap = cv2.VideoCapture(0)
+cap = cv2.VideoCapture(4747)
 print("--- Herramienta de Creacion de Dataset ---")
 print("Presiona 'M' (madura), 'I' (intermedia), o 'V' (verde) para guardar una imagen.")
 print("Presiona 'Q' para salir.")
