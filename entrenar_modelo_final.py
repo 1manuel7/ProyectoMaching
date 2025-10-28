@@ -3,6 +3,7 @@ from tensorflow.keras.preprocessing.image import ImageDataGenerator
 from tensorflow.keras.applications import MobileNetV2
 from tensorflow.keras.layers import Input, Dense, GlobalAveragePooling2D, Dropout
 from tensorflow.keras.models import Model
+from tensorflow.keras.callbacks import ModelCheckpoint # <-- NUEVA IMPORTACIÓN
 import matplotlib.pyplot as plt
 import numpy as np
 from sklearn.utils.class_weight import compute_class_weight
@@ -13,7 +14,7 @@ IMG_WIDTH = 224
 BATCH_SIZE = 32
 DATASET_DIR = 'dataset'
 EPOCHS_FASE_1 = 15
-EPOCHS_FASE_2 = 15 # AUMENTAMOS LAS ÉPOCAS DE AJUSTE FINO
+EPOCHS_FASE_2 = 10
 TOTAL_EPOCHS = EPOCHS_FASE_1 + EPOCHS_FASE_2
 
 # --- AUMENTACIÓN DE DATOS ---
@@ -71,23 +72,33 @@ model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=0.001),
               loss='categorical_crossentropy',
               metrics=['accuracy'])
 
+# --- NUEVO: CALLBACK PARA GUARDAR EL MEJOR MODELO ---
+# Guardará el modelo en 'modelo_manzanas.h5' solo cuando 'val_loss' (pérdida de validación) mejore.
+checkpoint_cb = ModelCheckpoint(
+    'modelo_manzanas.h5',
+    monitor='val_loss',
+    save_best_only=True,
+    mode='min',
+    verbose=1
+)
+
 # --- FASE 1: ENTRENAMIENTO INICIAL ---
 print("\n--- INICIANDO FASE 1: ENTRENAMIENTO DE CAPAS SUPERIORES ---")
 history = model.fit(
     train_generator,
     epochs=EPOCHS_FASE_1,
     validation_data=validation_generator,
-    class_weight=class_weights_dict
+    class_weight=class_weights_dict,
+    callbacks=[checkpoint_cb] # <-- AÑADIMOS EL CALLBACK
 )
 
 # --- FASE 2: AJUSTE FINO (FINE-TUNING) ---
 print("\n--- INICIANDO FASE 2: AJUSTE FINO (FINE-TUNING) ---")
 base_model.trainable = True
-# AJUSTE: DESCONGELAMOS MÁS CAPAS (las últimas 55) para un aprendizaje más profundo
-for layer in base_model.layers[:-55]:
+for layer in base_model.layers[:-20]: # Usamos -20, que es más conservador
     layer.trainable = False
 
-model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=0.0001), # Tasa de aprendizaje baja
+model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=0.0001),
               loss='categorical_crossentropy',
               metrics=['accuracy'])
 
@@ -96,12 +107,13 @@ history_fine = model.fit(
     epochs=TOTAL_EPOCHS,
     validation_data=validation_generator,
     initial_epoch=history.epoch[-1] + 1,
-    class_weight=class_weights_dict
+    class_weight=class_weights_dict,
+    callbacks=[checkpoint_cb] # <-- AÑADIMOS EL CALLBACK TAMBIÉN AQUÍ
 )
 
-# Guardar el modelo final
-model.save('modelo_manzanas.h5')
-print("\n¡Entrenamiento Definitivo completado! Modelo guardado como 'modelo_manzanas.h5'")
+# --- ELIMINADO: Ya no guardamos el modelo al final, ModelCheckpoint lo hizo por nosotros ---
+# model.save('modelo_manzanas.h5') 
+print("\n¡Entrenamiento completado! El mejor modelo ha sido guardado como 'modelo_manzanas.h5'")
 
 
 # --- VISUALIZACIÓN DE RESULTADOS ---
