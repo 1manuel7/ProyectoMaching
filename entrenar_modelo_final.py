@@ -3,7 +3,7 @@ from tensorflow.keras.preprocessing.image import ImageDataGenerator
 from tensorflow.keras.applications import MobileNetV2
 from tensorflow.keras.layers import Input, Dense, GlobalAveragePooling2D, Dropout
 from tensorflow.keras.models import Model
-from tensorflow.keras.callbacks import ModelCheckpoint # <-- NUEVA IMPORTACIÓN
+from tensorflow.keras.callbacks import ModelCheckpoint, EarlyStopping # <-- NUEVAS IMPORTACIONES
 import matplotlib.pyplot as plt
 import numpy as np
 from sklearn.utils.class_weight import compute_class_weight
@@ -13,14 +13,11 @@ IMG_HEIGHT = 224
 IMG_WIDTH = 224
 BATCH_SIZE = 32
 DATASET_DIR = 'dataset'
-EPOCHS_FASE_1 = 15
-EPOCHS_FASE_2 = 10
-TOTAL_EPOCHS = EPOCHS_FASE_1 + EPOCHS_FASE_2
 
 # --- AUMENTACIÓN DE DATOS ---
 train_datagen = ImageDataGenerator(
     rescale=1./255,
-    rotation_range=30,
+    rotation_range=40,
     width_shift_range=0.2,
     height_shift_range=0.2,
     shear_range=0.2,
@@ -53,13 +50,17 @@ print(f"Clases detectadas: {train_generator.class_indices}")
 
 # --- CÁLCULO DE PESOS DE CLASE (CLASS WEIGHTS) ---
 class_indices = train_generator.classes
-class_weights = compute_class_weight(class_weight='balanced', classes=np.unique(class_indices), y=class_indices)
-class_weights_dict = dict(enumerate(class_weights))
-print(f"Pesos de clase calculados: {class_weights_dict}")
+try:
+    class_weights = compute_class_weight(class_weight='balanced', classes=np.unique(class_indices), y=class_indices)
+    class_weights_dict = dict(enumerate(class_weights))
+    print(f"Pesos de clase calculados: {class_weights_dict}")
+except ImportError:
+    print("ADVERTENCIA: scikit-learn no está instalado. Ejecuta 'pip install scikit-learn'. No se usarán pesos de clase.")
+    class_weights_dict = None
 
 # --- MODELO AVANZADO CON TRANSFER LEARNING ---
 base_model = MobileNetV2(input_shape=(IMG_HEIGHT, IMG_WIDTH, 3), include_top=False, weights='imagenet')
-base_model.trainable = False
+base_model.trainable = False # Mantenemos congelado para la primera fase
 
 inputs = Input(shape=(IMG_HEIGHT, IMG_WIDTH, 3))
 x = base_model(inputs, training=False)
@@ -72,66 +73,46 @@ model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=0.001),
               loss='categorical_crossentropy',
               metrics=['accuracy'])
 
-# --- NUEVO: CALLBACK PARA GUARDAR EL MEJOR MODELO ---
-# Guardará el modelo en 'modelo_manzanas.h5' solo cuando 'val_loss' (pérdida de validación) mejore.
-checkpoint_cb = ModelCheckpoint(
-    'modelo_manzanas.h5',
-    monitor='val_loss',
-    save_best_only=True,
-    mode='min',
-    verbose=1
-)
+# --- NUEVO: GUARDIANES DEL ENTRENAMIENTO ---
+# 1. Guarda solo el mejor modelo basado en la pérdida de validación
+checkpoint_cb = ModelCheckpoint('modelo_manzanas.h5', monitor='val_loss', save_best_only=True, mode='min', verbose=1)
+# 2. Detiene el entrenamiento si no hay mejora después de 7 épocas (más paciencia)
+early_stopping_cb = EarlyStopping(monitor='val_loss', patience=7, mode='min', verbose=1, restore_best_weights=True)
 
-# --- FASE 1: ENTRENAMIENTO INICIAL ---
-print("\n--- INICIANDO FASE 1: ENTRENAMIENTO DE CAPAS SUPERIORES ---")
+
+# --- ENTRENAMIENTO CONTROLADO ---
+print("\n--- INICIANDO ENTRENAMIENTO CONTROLADO ---")
+EPOCHS = 50 # Le damos un número alto de épocas, EarlyStopping decidirá cuándo parar
+
 history = model.fit(
     train_generator,
-    epochs=EPOCHS_FASE_1,
+    epochs=EPOCHS,
     validation_data=validation_generator,
     class_weight=class_weights_dict,
-    callbacks=[checkpoint_cb] # <-- AÑADIMOS EL CALLBACK
+    callbacks=[checkpoint_cb, early_stopping_cb] # <--- AÑADIMOS LOS GUARDIANES
 )
 
-# --- FASE 2: AJUSTE FINO (FINE-TUNING) ---
-print("\n--- INICIANDO FASE 2: AJUSTE FINO (FINE-TUNING) ---")
-base_model.trainable = True
-for layer in base_model.layers[:-20]: # Usamos -20, que es más conservador
-    layer.trainable = False
-
-model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=0.0001),
-              loss='categorical_crossentropy',
-              metrics=['accuracy'])
-
-history_fine = model.fit(
-    train_generator,
-    epochs=TOTAL_EPOCHS,
-    validation_data=validation_generator,
-    initial_epoch=history.epoch[-1] + 1,
-    class_weight=class_weights_dict,
-    callbacks=[checkpoint_cb] # <-- AÑADIMOS EL CALLBACK TAMBIÉN AQUÍ
-)
-
-# --- ELIMINADO: Ya no guardamos el modelo al final, ModelCheckpoint lo hizo por nosotros ---
-# model.save('modelo_manzanas.h5') 
 print("\n¡Entrenamiento completado! El mejor modelo ha sido guardado como 'modelo_manzanas.h5'")
 
 
 # --- VISUALIZACIÓN DE RESULTADOS ---
-acc = history.history['accuracy'] + history_fine.history['accuracy']
-val_acc = history.history['val_accuracy'] + history_fine.history['val_accuracy']
-loss = history.history['loss'] + history_fine.history['loss']
-val_loss = history.history['val_loss'] + history_fine.history['val_loss']
+acc = history.history['accuracy']
+val_acc = history.history['val_accuracy']
+loss = history.history['loss']
+val_loss = history.history['val_loss']
+
+epochs_range = range(len(acc))
 
 plt.figure(figsize=(12, 6))
 plt.subplot(1, 2, 1)
-plt.plot(acc, label='Precisión de Entrenamiento')
-plt.plot(val_acc, label='Precisión de Validación')
+plt.plot(epochs_range, acc, label='Precisión de Entrenamiento')
+plt.plot(epochs_range, val_acc, label='Precisión de Validación')
 plt.legend(loc='lower right')
 plt.title('Precisión de Entrenamiento y Validación')
 
 plt.subplot(1, 2, 2)
-plt.plot(loss, label='Pérdida de Entrenamiento')
-plt.plot(val_loss, label='Pérdida de Validación')
+plt.plot(epochs_range, loss, label='Pérdida de Entrenamiento')
+plt.plot(epochs_range, val_loss, label='Pérdida de Validación')
 plt.legend(loc='upper right')
 plt.title('Pérdida de Entrenamiento y Validación')
 plt.show()

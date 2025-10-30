@@ -96,7 +96,6 @@ class AsistenteInventarioApp(QMainWindow):
         self.medidas_tamano = {}
         self.predicciones_recientes = {}
         
-        # --- Variables de estado para el inventario ---
         self.lote_actual_conteo = Counter()
         self.lote_actual_valor = 0.0
         self.total_dia_conteo = Counter()
@@ -109,7 +108,6 @@ class AsistenteInventarioApp(QMainWindow):
         self.setWindowTitle("Asistente de Inventario de Manzanas v3.0")
         self.setGeometry(100, 100, 1200, 750) 
 
-        # --- Hoja de Estilos ---
         style_sheet = """
             QWidget { background-color: #2E2E2E; color: #E0E0E0; }
             #PanelControl { background-color: #383838; border-radius: 8px; }
@@ -136,10 +134,8 @@ class AsistenteInventarioApp(QMainWindow):
         central_widget = QWidget(); self.setCentralWidget(central_widget)
         main_layout = QHBoxLayout(central_widget); main_layout.setSpacing(15); main_layout.setContentsMargins(15, 15, 15, 15)
         
-        # --- Panel de Video (Izquierda) ---
         self.video_label = QLabel("Presiona 'Iniciar'"); self.video_label.setAlignment(Qt.AlignCenter); self.video_label.setFont(QFont("Arial", 14)); self.video_label.setObjectName("VideoLabel"); main_layout.addWidget(self.video_label, 7)
         
-        # --- Panel de Control (Derecha) ---
         panel_control_widget = QWidget(); panel_control_widget.setObjectName("PanelControl"); control_panel_layout = QVBoxLayout(panel_control_widget); main_layout.addWidget(panel_control_widget, 3)
         
         # --- CORRECCIÓN DE LOS TÍTULOS ---
@@ -193,8 +189,6 @@ class AsistenteInventarioApp(QMainWindow):
         self.timer.timeout.connect(self.update_frame)
         self.is_running = False
         
-    # --- initArduino() ya no es necesario ---
-
     def toggle_camera(self):
         if not self.is_running:
             if not self.cap.isOpened(): self.cap.open(0)
@@ -203,7 +197,6 @@ class AsistenteInventarioApp(QMainWindow):
             self.timer.stop(); self.toggle_button.setText("Iniciar"); self.is_running = False
             self.video_label.setText("Cámara detenida.")
             self.lote_display.setText("Detección detenida.")
-            # Limpiar rastreadores al detener
             self.tracker = CentroidTracker()
             self.medidas_tamano.clear()
             self.predicciones_recientes.clear()
@@ -234,24 +227,24 @@ class AsistenteInventarioApp(QMainWindow):
         self.predicciones_recientes.clear()
 
     def actualizar_display_total(self):
-        # --- CORRECCIÓN: Calcular el total sumando las categorías de madurez ---
+        # --- CORRECCIÓN 1: Calcular el total sumando las categorías de madurez ---
         total_manzanas = self.total_dia_conteo.get('madura', 0) + self.total_dia_conteo.get('intermedia', 0) + self.total_dia_conteo.get('verde', 0)
         
-        reporte_html = f"<b>Total Acumulado: {total_manzanas} manzanas</b><br>"
-        reporte_html += f"<b>Valor Total: S/ {self.total_dia_valor:.2f}</b><br><br>"
-        reporte_html += "<b>Detalle por Madurez:</b><br>"
-        reporte_html += f"&nbsp;&nbsp; Maduras: {self.total_dia_conteo.get('madura', 0)}<br>" # <-- CORRECCIÓN: Arreglado typo
-        reporte_html += f"&nbsp;&nbsp; Intermedias: {self.total_dia_conteo.get('intermedia', 0)}<br>"
-        reporte_html += f"&nbsp;&nbsp; Verdes: {self.total_dia_conteo.get('verde', 0)}<br><br>"
-        reporte_html += "<b>Detalle por Tamaño:</b><br>"
-        reporte_html += f"&nbsp;&nbsp; Grandes: {self.total_dia_conteo.get('Grande', 0)}<br>"
-        reporte_html += f"&nbsp;&nbsp; Medianas: {self.total_dia_conteo.get('Mediana', 0)}<br>"
-        reporte_html += f"&nbsp;&nbsp; Pequeñas: {self.total_dia_conteo.get('Pequena', 0)}"
+        reporte_html = (f"<b>Total Acumulado: {total_manzanas} manzanas</b><br>"
+                       f"<b>Valor Total: S/ {self.total_dia_valor:.2f}</b><br><br>"
+                       f"<b>Detalle por Madurez:</b><br>"
+                       f"&nbsp;&nbsp; Maduras: {self.total_dia_conteo.get('madura', 0)}<br>"
+                       f"&nbsp;&nbsp; Intermedias: {self.total_dia_conteo.get('intermedia', 0)}<br>"
+                       f"&nbsp;&nbsp; Verdes: {self.total_dia_conteo.get('verde', 0)}<br><br>"
+                       f"<b>Detalle por Tamaño:</b><br>"
+                       f"&nbsp;&nbsp; Grandes: {self.total_dia_conteo.get('Grande', 0)}<br>"
+                       f"&nbsp;&nbsp; Medianas: {self.total_dia_conteo.get('Mediana', 0)}<br>"
+                       f"&nbsp;&nbsp; Pequeñas: {self.total_dia_conteo.get('Pequena', 0)}")
         
         self.total_display.setText(reporte_html)
 
     def exportar_y_reiniciar(self):
-        # --- CORRECCIÓN: Calcular el total sumando las categorías de madurez ---
+        # --- CORRECCIÓN 1: Calcular el total sumando las categorías de madurez ---
         total_manzanas = self.total_dia_conteo.get('madura', 0) + self.total_dia_conteo.get('intermedia', 0) + self.total_dia_conteo.get('verde', 0)
 
         if total_manzanas == 0:
@@ -319,7 +312,6 @@ class AsistenteInventarioApp(QMainWindow):
         rects = [boxes[i] for i in indexes.flatten()] if len(indexes) > 0 else []
         objects = self.tracker.update([ (x, y, x + w_box, y + h_box) for (x, y, w_box, h_box) in rects ])
         
-        all_results_text = []
         lote_conteo_temp = Counter()
         lote_valor_temp = 0.0
         p_madura, p_intermedia, p_verde = self.get_precios()
@@ -353,6 +345,7 @@ class AsistenteInventarioApp(QMainWindow):
                         roi = frame[y:y+h_box, x:x+w_box]
                         if roi.size > 0:
                             img_resized = cv2.resize(roi, (IMG_HEIGHT, IMG_WIDTH)); img_array = tf.keras.utils.img_to_array(img_resized); img_batch = np.expand_dims(img_array, axis=0)
+                            img_batch = img_batch / 255.0 # Normalización
                             prediction = classification_model.predict(img_batch, verbose=0); score = tf.nn.softmax(prediction[0])
                             pred_actual = CLASS_NAMES[np.argmax(score)]
                             if objectID not in self.predicciones_recientes: self.predicciones_recientes[objectID] = deque(maxlen=5)
