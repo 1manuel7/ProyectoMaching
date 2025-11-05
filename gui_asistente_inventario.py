@@ -2,28 +2,21 @@ import sys
 import cv2
 import numpy as np
 import tensorflow as tf
-import serial
+import serial  # <--- IMPORTADO DE NUEVO
 import time
-import csv
 import os
-from datetime import datetime
-from PyQt5.QtWidgets import QApplication, QMainWindow, QLabel, QVBoxLayout, QHBoxLayout, QWidget, QPushButton, QFrame, QLineEdit
+from PyQt5.QtWidgets import QApplication, QMainWindow, QLabel, QVBoxLayout, QHBoxLayout, QWidget, QPushButton, QFrame, QCheckBox
 from PyQt5.QtGui import QImage, QPixmap, QFont
 from PyQt5.QtCore import QTimer, Qt
-from collections import OrderedDict, deque, Counter
+from collections import OrderedDict, deque
 from scipy.spatial import distance as dist
 
-# --- (La clase CentroidTracker y la carga de modelos no cambian) ---
+# --- (Clase CentroidTracker: Sin cambios) ---
 class CentroidTracker:
     def __init__(self, maxDisappeared=30):
-        self.nextObjectID = 0
-        self.objects = OrderedDict()
-        self.disappeared = OrderedDict()
-        self.maxDisappeared = maxDisappeared
+        self.nextObjectID = 0; self.objects = OrderedDict(); self.disappeared = OrderedDict(); self.maxDisappeared = maxDisappeared
     def register(self, centroid):
-        self.objects[self.nextObjectID] = centroid
-        self.disappeared[self.nextObjectID] = 0
-        self.nextObjectID += 1
+        self.objects[self.nextObjectID] = centroid; self.disappeared[self.nextObjectID] = 0; self.nextObjectID += 1
     def deregister(self, objectID):
         if objectID in self.objects: del self.objects[objectID]
         if objectID in self.disappeared: del self.disappeared[objectID]
@@ -34,28 +27,19 @@ class CentroidTracker:
                 if self.disappeared[objectID] > self.maxDisappeared: self.deregister(objectID)
             return self.objects
         inputCentroids = np.zeros((len(rects), 2), dtype="int")
-        for (i, (startX, startY, endX, endY)) in enumerate(rects):
-            cX = int((startX + endX) / 2.0); cY = int((startY + endY) / 2.0)
-            inputCentroids[i] = (cX, cY)
+        for (i, (startX, startY, endX, endY)) in enumerate(rects): cX = int((startX + endX) / 2.0); cY = int((startY + endY) / 2.0); inputCentroids[i] = (cX, cY)
         if len(self.objects) == 0:
             for i in range(len(inputCentroids)): self.register(inputCentroids[i])
         else:
             objectIDs = list(self.objects.keys()); objectCentroids = list(self.objects.values())
-            D = dist.cdist(np.array(objectCentroids), inputCentroids)
-            rows = D.min(axis=1).argsort(); cols = D.argmin(axis=1)[rows]
-            usedRows, usedCols = set(), set()
+            D = dist.cdist(np.array(objectCentroids), inputCentroids); rows = D.min(axis=1).argsort(); cols = D.argmin(axis=1)[rows]; usedRows, usedCols = set(), set()
             for (row, col) in zip(rows, cols):
                 if row in usedRows or col in usedCols: continue
-                objectID = objectIDs[row]
-                self.objects[objectID] = inputCentroids[col]
-                self.disappeared[objectID] = 0
-                usedRows.add(row); usedCols.add(col)
-            unusedRows = set(range(D.shape[0])).difference(usedRows)
-            unusedCols = set(range(D.shape[1])).difference(usedCols)
+                objectID = objectIDs[row]; self.objects[objectID] = inputCentroids[col]; self.disappeared[objectID] = 0; usedRows.add(row); usedCols.add(col)
+            unusedRows = set(range(D.shape[0])).difference(usedRows); unusedCols = set(range(D.shape[1])).difference(usedCols)
             if D.shape[0] >= D.shape[1]:
                 for row in unusedRows:
-                    objectID = objectIDs[row]
-                    self.disappeared[objectID] += 1
+                    objectID = objectIDs[row]; self.disappeared[objectID] += 1
                     if self.disappeared[objectID] > self.maxDisappeared: self.deregister(objectID)
             else:
                 for col in unusedCols: self.register(inputCentroids[col])
@@ -65,10 +49,11 @@ class CentroidTracker:
 PIXELES_POR_MM = 3.2 
 MANZANA_PEQUENA_MM = 65
 MANZANA_MEDIANA_MM = 80
+PUERTO_ARDUINO = 'COM9' # <--- ASEGÚRATE DE QUE ESTE SEA TU PUERTO
 CONFIDENCE_THRESHOLD = 0.5
 NMS_THRESHOLD = 0.3
 
-# --- CARGA DE MODELOS ---
+# --- (Carga de Modelos: Sin cambios) ---
 model_loaded = False
 try:
     classification_model = tf.keras.models.load_model('modelo_manzanas.h5')
@@ -89,97 +74,42 @@ except Exception as e:
     print(f"Error fatal al cargar YOLOv3: {e}")
     sys.exit()
 
-class AsistenteInventarioApp(QMainWindow):
+class ClasificadorApp(QMainWindow):
     def __init__(self):
         super().__init__()
         self.tracker = CentroidTracker()
+        self.objetos_posicion_previa = {}
         self.medidas_tamano = {}
         self.predicciones_recientes = {}
-        
-        self.lote_actual_conteo = Counter()
-        self.lote_actual_valor = 0.0
-        self.total_dia_conteo = Counter()
-        self.total_dia_valor = 0.0
-        
+        self.arduino = None # <--- AÑADIDO
         self.initUI()
         self.initCamera()
-        
-    def initUI(self):
-        self.setWindowTitle("Asistente de Inventario de Manzanas v3.0")
-        self.setGeometry(100, 100, 1200, 750) 
+        self.initArduino() # <--- AÑADIDO
 
-        style_sheet = """
-            QWidget { background-color: #2E2E2E; color: #E0E0E0; }
-            #PanelControl { background-color: #383838; border-radius: 8px; }
-            QLabel { color: #E0E0E0; font-family: 'Segoe UI', Arial; }
-            #TituloPanel, #TituloPrecios, #TituloLote, #TituloDia {
-                font-size: 16px; font-weight: bold; color: #FFFFFF; padding: 10px;
-                border-bottom: 1px solid #4A4A4A;
-            }
-            #VideoLabel { background-color: #000000; }
-            #ResultadosDisplay, #TotalDisplay { padding: 10px; font-size: 12px; }
-            QPushButton { 
-                background-color: #4A4A4A; color: #FFFFFF; font-weight: bold; 
-                border: 1px solid #6A6A6A; padding: 10px; border-radius: 4px;
-            }
-            QPushButton:hover { background-color: #5A5A5A; }
-            QPushButton:pressed { background-color: #6A6A6A; }
-            QLineEdit { 
-                background-color: #5A5A5A; color: #FFFFFF; border: 1px solid #6A6A6A; 
-                border-radius: 4px; padding: 5px; font-weight: bold;
-            }
-        """
-        self.setStyleSheet(style_sheet)
+    def initUI(self):
+        self.setWindowTitle("Clasificador de Manzanas v2.3 (Estable)")
+        self.setGeometry(100, 100, 1200, 700)
+        self.setStyleSheet("QWidget { background-color: #2E2E2E; color: #E0E0E0; } /*... (resto de tu estilo) ...*/")
         
         central_widget = QWidget(); self.setCentralWidget(central_widget)
-        main_layout = QHBoxLayout(central_widget); main_layout.setSpacing(15); main_layout.setContentsMargins(15, 15, 15, 15)
+        main_layout = QHBoxLayout(central_widget)
         
         self.video_label = QLabel("Presiona 'Iniciar'"); self.video_label.setAlignment(Qt.AlignCenter); self.video_label.setFont(QFont("Arial", 14)); self.video_label.setObjectName("VideoLabel"); main_layout.addWidget(self.video_label, 7)
         
-        panel_control_widget = QWidget(); panel_control_widget.setObjectName("PanelControl"); control_panel_layout = QVBoxLayout(panel_control_widget); main_layout.addWidget(panel_control_widget, 3)
+        control_panel_layout = QVBoxLayout(); main_layout.addLayout(control_panel_layout, 3)
         
-        # --- CORRECCIÓN DE LOS TÍTULOS ---
-        title_label = QLabel("Panel de Control")
-        title_label.setObjectName("TituloPanel")
-        title_label.setAlignment(Qt.AlignCenter)
-        control_panel_layout.addWidget(title_label)
+        title_label = QLabel("Panel de Control"); title_label.setFont(QFont("Arial", 18, QFont.Bold)); title_label.setAlignment(Qt.AlignCenter); control_panel_layout.addWidget(title_label)
         
-        precios_label = QLabel("Configuración de Precios (S/.)")
-        precios_label.setObjectName("TituloPrecios")
-        precios_label.setAlignment(Qt.AlignCenter)
-        control_panel_layout.addWidget(precios_label)
-
-        precio_layout = QHBoxLayout(); precio_layout.setContentsMargins(10, 5, 10, 10)
-        precio_layout.addWidget(QLabel("Madura:")); self.precio_madura = QLineEdit("1.50"); self.precio_madura.setFixedWidth(60); precio_layout.addWidget(self.precio_madura)
-        precio_layout.addWidget(QLabel("Intermedia:")); self.precio_intermedia = QLineEdit("1.00"); self.precio_intermedia.setFixedWidth(60); precio_layout.addWidget(self.precio_intermedia)
-        precio_layout.addWidget(QLabel("Verde:")); self.precio_verde = QLineEdit("0.50"); self.precio_verde.setFixedWidth(60); precio_layout.addWidget(self.precio_verde)
-        control_panel_layout.addLayout(precio_layout)
-
-        lote_label = QLabel("Lote Actual (En Cámara)")
-        lote_label.setObjectName("TituloLote")
-        lote_label.setAlignment(Qt.AlignCenter)
-        control_panel_layout.addWidget(lote_label)
+        # Checkboxes de visualización (los mantenemos)
+        checkbox_layout = QHBoxLayout()
+        checkbox_layout.addWidget(QLabel("Mostrar:"))
+        self.check_tamano = QCheckBox("Tamaño"); self.check_tamano.setChecked(True)
+        self.check_color = QCheckBox("Color"); self.check_color.setChecked(True)
+        self.check_madurez = QCheckBox("Madurez"); self.check_madurez.setChecked(True)
+        checkbox_layout.addWidget(self.check_tamano); checkbox_layout.addWidget(self.check_color); checkbox_layout.addWidget(self.check_madurez)
+        control_panel_layout.addLayout(checkbox_layout)
         
-        self.lote_display = QLabel("No se detectan manzanas"); self.lote_display.setObjectName("ResultadosDisplay"); self.lote_display.setAlignment(Qt.AlignTop | Qt.AlignLeft); self.lote_display.setWordWrap(True)
-        control_panel_layout.addWidget(self.lote_display)
-        
-        self.add_to_total_button = QPushButton("Añadir Lote al Total del Día"); self.add_to_total_button.clicked.connect(self.anadir_al_total)
-        control_panel_layout.addWidget(self.add_to_total_button)
-        
-        control_panel_layout.addWidget(QFrame(frameShape=QFrame.HLine))
-
-        total_label = QLabel("Total del Día")
-        total_label.setObjectName("TituloDia")
-        total_label.setAlignment(Qt.AlignCenter)
-        control_panel_layout.addWidget(total_label)
-        
-        self.total_display = QLabel("Total: 0 manzanas (S/ 0.00)"); self.total_display.setObjectName("TotalDisplay"); self.total_display.setAlignment(Qt.AlignTop | Qt.AlignLeft); self.total_display.setWordWrap(True)
-        control_panel_layout.addWidget(self.total_display)
-        
-        self.export_button = QPushButton("Exportar y Reiniciar Día"); self.export_button.clicked.connect(self.exportar_y_reiniciar)
-        control_panel_layout.addWidget(self.export_button)
-        
-        control_panel_layout.addStretch()
+        self.results_display = QLabel("Esperando inicio..."); self.results_display.setFont(QFont("Arial", 12)); self.results_display.setAlignment(Qt.AlignTop | Qt.AlignLeft); control_panel_layout.addWidget(self.results_display); control_panel_layout.addStretch()
         
         button_layout = QHBoxLayout(); self.toggle_button = QPushButton("Iniciar"); self.toggle_button.clicked.connect(self.toggle_camera); self.quit_button = QPushButton("Salir"); self.quit_button.clicked.connect(self.close); button_layout.addWidget(self.toggle_button); button_layout.addWidget(self.quit_button); control_panel_layout.addLayout(button_layout)
         
@@ -189,100 +119,24 @@ class AsistenteInventarioApp(QMainWindow):
         self.timer.timeout.connect(self.update_frame)
         self.is_running = False
         
+    # --- FUNCIÓN AÑADIDA ---
+    def initArduino(self):
+        try:
+            self.arduino = serial.Serial(PUERTO_ARDUINO, 9600, timeout=1)
+            time.sleep(2)
+            print(f"Conexión con Arduino en {PUERTO_ARDUINO} establecida.")
+        except Exception as e:
+            print(f"ADVERTENCIA: No se pudo conectar con Arduino. {e}")
+            self.arduino = None
+
     def toggle_camera(self):
+        # (Sin cambios)
         if not self.is_running:
             if not self.cap.isOpened(): self.cap.open(0)
             self.timer.start(30); self.toggle_button.setText("Detener"); self.is_running = True
         else:
             self.timer.stop(); self.toggle_button.setText("Iniciar"); self.is_running = False
             self.video_label.setText("Cámara detenida.")
-            self.lote_display.setText("Detección detenida.")
-            self.tracker = CentroidTracker()
-            self.medidas_tamano.clear()
-            self.predicciones_recientes.clear()
-
-    def get_precios(self):
-        try: p_madura = float(self.precio_madura.text())
-        except ValueError: p_madura = 0.0
-        try: p_intermedia = float(self.precio_intermedia.text())
-        except ValueError: p_intermedia = 0.0
-        try: p_verde = float(self.precio_verde.text())
-        except ValueError: p_verde = 0.0
-        return p_madura, p_intermedia, p_verde
-
-    def anadir_al_total(self):
-        if not self.lote_actual_conteo:
-            print("No hay manzanas en el lote actual para añadir.")
-            return
-
-        self.total_dia_conteo.update(self.lote_actual_conteo)
-        self.total_dia_valor += self.lote_actual_valor
-        
-        print(f"Lote añadido al total. Total del día: {self.total_dia_conteo}")
-        self.actualizar_display_total()
-        
-        self.tracker = CentroidTracker()
-        self.lote_display.setText("Lote añadido. Listo para el siguiente.")
-        self.medidas_tamano.clear()
-        self.predicciones_recientes.clear()
-
-    def actualizar_display_total(self):
-        # --- CORRECCIÓN 1: Calcular el total sumando las categorías de madurez ---
-        total_manzanas = self.total_dia_conteo.get('madura', 0) + self.total_dia_conteo.get('intermedia', 0) + self.total_dia_conteo.get('verde', 0)
-        
-        reporte_html = (f"<b>Total Acumulado: {total_manzanas} manzanas</b><br>"
-                       f"<b>Valor Total: S/ {self.total_dia_valor:.2f}</b><br><br>"
-                       f"<b>Detalle por Madurez:</b><br>"
-                       f"&nbsp;&nbsp; Maduras: {self.total_dia_conteo.get('madura', 0)}<br>"
-                       f"&nbsp;&nbsp; Intermedias: {self.total_dia_conteo.get('intermedia', 0)}<br>"
-                       f"&nbsp;&nbsp; Verdes: {self.total_dia_conteo.get('verde', 0)}<br><br>"
-                       f"<b>Detalle por Tamaño:</b><br>"
-                       f"&nbsp;&nbsp; Grandes: {self.total_dia_conteo.get('Grande', 0)}<br>"
-                       f"&nbsp;&nbsp; Medianas: {self.total_dia_conteo.get('Mediana', 0)}<br>"
-                       f"&nbsp;&nbsp; Pequeñas: {self.total_dia_conteo.get('Pequena', 0)}")
-        
-        self.total_display.setText(reporte_html)
-
-    def exportar_y_reiniciar(self):
-        # --- CORRECCIÓN 1: Calcular el total sumando las categorías de madurez ---
-        total_manzanas = self.total_dia_conteo.get('madura', 0) + self.total_dia_conteo.get('intermedia', 0) + self.total_dia_conteo.get('verde', 0)
-
-        if total_manzanas == 0:
-            print("No hay nada que exportar.")
-            self.total_display.setText("Nada que exportar. Contadores reiniciados.")
-            return
-
-        nombre_archivo = 'reporte_inventario.csv'
-        
-        datos_fila = [
-            datetime.now().strftime("%Y-%m-%d %H:%M"),
-            total_manzanas,
-            self.total_dia_conteo.get('madura', 0),
-            self.total_dia_conteo.get('intermedia', 0),
-            self.total_dia_conteo.get('verde', 0),
-            self.total_dia_conteo.get('Grande', 0),
-            self.total_dia_conteo.get('Mediana', 0),
-            self.total_dia_conteo.get('Pequena', 0),
-            f"{self.total_dia_valor:.2f}"
-        ]
-        
-        try:
-            archivo_existe = os.path.isfile(nombre_archivo)
-            with open(nombre_archivo, mode='a', newline='', encoding='utf-8') as f:
-                writer = csv.writer(f)
-                if not archivo_existe:
-                    writer.writerow(["Fecha y Hora", "Total Manzanas", "Maduras", "Intermedias", "Verdes", "Grandes", "Medianas", "Pequeñas", "Valor Total (S/)"])
-                writer.writerow(datos_fila)
-            
-            print(f"Reporte guardado en {nombre_archivo}")
-            self.total_display.setText(f"Reporte guardado en {nombre_archivo}.\n¡Contadores reiniciados!")
-            
-            self.total_dia_conteo.clear()
-            self.total_dia_valor = 0.0
-            
-        except Exception as e:
-            print(f"Error al exportar: {e}")
-            self.total_display.setText(f"Error al guardar: {e}")
 
     def update_frame(self):
         ret, frame = self.cap.read()
@@ -292,6 +146,11 @@ class AsistenteInventarioApp(QMainWindow):
         h, w, _ = frame.shape
         hsv_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
         
+        # --- LÍNEA DE ACCIÓN AÑADIDA ---
+        linea_y = h * 2 // 3
+        cv2.line(output_frame, (0, linea_y), (w, linea_y), (0, 0, 255), 2)
+
+        # (Detección YOLO sin cambios)
         blob = cv2.dnn.blobFromImage(frame, 0.00392, (416, 416), (0, 0, 0), True, crop=False)
         net.setInput(blob)
         outs = net.forward(output_layers)
@@ -309,19 +168,18 @@ class AsistenteInventarioApp(QMainWindow):
                     confidences.append(float(confidence))
 
         indexes = cv2.dnn.NMSBoxes(boxes, confidences, CONFIDENCE_THRESHOLD, NMS_THRESHOLD)
+        
         rects = [boxes[i] for i in indexes.flatten()] if len(indexes) > 0 else []
         objects = self.tracker.update([ (x, y, x + w_box, y + h_box) for (x, y, w_box, h_box) in rects ])
         
-        lote_conteo_temp = Counter()
-        lote_valor_temp = 0.0
-        p_madura, p_intermedia, p_verde = self.get_precios()
-        
+        all_results_text = []
         for (objectID, centroid) in objects.items():
             for rect in rects:
                 x, y, w_box, h_box = rect
                 if centroid[0] > x and centroid[0] < x + w_box and centroid[1] > y and centroid[1] < y + h_box:
                     x, y = max(0, x), max(0, y)
                     
+                    # (Lógica de Clasificación de Tamaño, Color y Madurez - sin cambios)
                     roi_hsv_mask = hsv_frame[y:y+h_box, x:x+w_box]; mask_roi = cv2.inRange(roi_hsv_mask, np.array([0, 40, 40]), np.array([180, 255, 255])); contornos_roi, _ = cv2.findContours(mask_roi, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
                     if not contornos_roi: continue
                     contorno_manzana = max(contornos_roi, key=cv2.contourArea); ((cx, cy), radio) = cv2.minEnclosingCircle(contorno_manzana); diametro_real_mm = (radio * 2) / PIXELES_POR_MM
@@ -354,27 +212,33 @@ class AsistenteInventarioApp(QMainWindow):
                                 clasificacion_madurez = max(set(self.predicciones_recientes[objectID]), key=list(self.predicciones_recientes[objectID]).count)
                                 confianza = 100 * np.max(score)
 
-                    if clasificacion_madurez != "Analizando...":
-                        lote_conteo_temp.update([clasificacion_tamano, clasificacion_color, clasificacion_madurez])
-                        if clasificacion_madurez == 'madura': lote_valor_temp += p_madura
-                        elif clasificacion_madurez == 'intermedia': lote_valor_temp += p_intermedia
-                        elif clasificacion_madurez == 'verde': lote_valor_temp += p_verde
+                    # --- LÓGICA DE VISUALIZACIÓN CON CHECKBOXES ---
+                    resultado_partes = [f"<b>Manzana {objectID}</b>"]
+                    if self.check_tamano.isChecked():
+                        resultado_partes.append(f"&nbsp;&nbsp;Tamaño: {clasificacion_tamano} ({diametro_promedio_mm:.1f} mm)")
+                    if self.check_color.isChecked():
+                        resultado_partes.append(f"&nbsp;&nbsp;Color: {clasificacion_color}")
+                    if self.check_madurez.isChecked() and model_loaded:
+                        resultado_partes.append(f"&nbsp;&nbsp;Madurez: {clasificacion_madurez} ({confianza:.1f}%)")
+                    all_results_text.append("<br>".join(resultado_partes))
                     
                     cv2.rectangle(output_frame, (x, y), (x + w_box, y + h_box), (0, 255, 0), 2)
-                    cv2.putText(output_frame, f"ID {objectID} ({clasificacion_madurez})", (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                    cv2.putText(output_frame, f"ID {objectID}", (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+
+                    # --- LÓGICA DE ACCIÓN DEL ARDUINO (AÑADIDA) ---
+                    posicion_previa = self.objetos_posicion_previa.get(objectID, 0)
+                    if posicion_previa < linea_y and centroid[1] >= linea_y:
+                        if self.arduino and clasificacion_madurez != "Analizando...":
+                            # Decidimos qué comando enviar. EJEMPLO: Clasificar por Madurez
+                            comando = clasificacion_madurez[0].upper() # 'V', 'I', o 'M'
+                            self.arduino.write(comando.encode())
+                            print(f"--> ¡CRUCE! Manzana {objectID} ({clasificacion_madurez}). Orden enviada: {comando}")
                     break
         
-        self.lote_actual_conteo = lote_conteo_temp
-        self.lote_actual_valor = lote_valor_temp
-        
-        if objects:
-            self.lote_display.setText(f"<b>Total Lote: {len(objects)} manzanas</b><br>"
-                                      f"<b>Valor Lote: S/ {self.lote_actual_valor:.2f}</b><br><br>"
-                                      f"Maduras: {self.lote_actual_conteo.get('madura', 0)} | "
-                                      f"Intermedias: {self.lote_actual_conteo.get('intermedia', 0)} | "
-                                      f"Verdes: {self.lote_actual_conteo.get('verde', 0)}")
-        else:
-            self.lote_display.setText("No se detectan manzanas")
+        self.objetos_posicion_previa = {obj_id: center[1] for obj_id, center in objects.items()}
+
+        if all_results_text: self.results_display.setText("<br><br>".join(all_results_text))
+        else: self.results_display.setText("No se detectan manzanas")
         
         rgb_image = cv2.cvtColor(output_frame, cv2.COLOR_BGR2RGB); h, w, ch = rgb_image.shape; bytes_per_line = ch * w
         qt_image = QImage(rgb_image.data, w, h, bytes_per_line, QImage.Format_RGB888)
@@ -384,10 +248,11 @@ class AsistenteInventarioApp(QMainWindow):
     def closeEvent(self, event):
         self.timer.stop()
         self.cap.release()
+        if self.arduino: self.arduino.close() # <--- AÑADIDO
         super().closeEvent(event)
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
-    main_window = AsistenteInventarioApp()
+    main_window = ClasificadorApp()
     main_window.show()
     sys.exit(app.exec_())
