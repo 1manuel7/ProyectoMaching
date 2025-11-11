@@ -1,49 +1,44 @@
-// Incluimos la librería para controlar los servomotores
 #include <Servo.h>
 
-// Creamos los objetos para cada servomotor
-Servo servoVerde;   // Servo para la categoría "verde"
-Servo servoIntermedia; // Servo para la categoría "intermedia"
-// No necesitamos un servo para "madura" si esa bandeja está al final
+Servo servoVerde;
+Servo servoIntermedia;
 
-// --- CONFIGURACIÓN INICIAL ---
+// --- CONSTANTES DE POSICIÓN ---
+// Ajusta estos ángulos según tu prototipo
+const int POS_REPOSO = 0;   // Posición donde el palito no bloquea nada
+const int POS_DESVIO = 90; // Posición donde el palito desvía la manzana
+
 void setup() {
-  // Iniciamos la comunicación con la computadora a 9600 baudios
-  Serial.begin(9600);
+  Serial.begin(9600); // Inicia comunicación con Python
 
-  // Conectamos los servos a los pines digitales PWM
-  // Asegúrate de que los pines coincidan con tus conexiones físicas
-  servoVerde.attach(9);      // Conecta el servo 'verde' al pin 9
-  servoIntermedia.attach(10); // Conecta el servo 'intermedia' al pin 10
+  // Conecta los servos a los pines PWM
+  servoVerde.attach(9);
+  servoIntermedia.attach(10);
 
-  // Posición inicial de los servos (posición de reposo)
-  servoVerde.write(0);
-  servoIntermedia.write(0);
+  // Asegurarse de que ambos servos empiecen en reposo
+  servoVerde.write(POS_REPOSO);
+  servoIntermedia.write(POS_REPOSO);
   
-  // Mensaje de inicio para saber que el Arduino está listo
   Serial.println("Arduino listo para clasificar.");
 }
 
-// --- BUCLE PRINCIPAL ---
 void loop() {
-  // Si hay datos disponibles en el puerto serie...
   if (Serial.available() > 0) {
-    // ...leemos el carácter que nos envía Python
-    char comando = Serial.read();
+    char comando = Serial.read(); // Leer el comando de Python
 
-    // --- Lógica de Clasificación ---
-    if (comando == 'G') { // Si recibe 'G' (Verde)
-      Serial.println("Recibido: Verde. Moviendo servo 1...");
-      servoVerde.write(90);  // Mueve el servo a 90 grados
-      delay(1000);           // Espera 1 segundo
-      servoVerde.write(0);   // Vuelve a la posición inicial
+    if (comando == 'V') { // 'V' para VERDE
+      Serial.println("Recibido: VERDE. Moviendo servo 1...");
+      servoVerde.write(POS_DESVIO);
+      delay(1000); // Mantiene la posición por 1 segundo
+      servoVerde.write(POS_REPOSO);
     } 
-    else if (comando == 'I') { // Si recibe 'I' (Intermedia)
-      Serial.println("Recibido: Intermedia. Moviendo servo 2...");
-      servoIntermedia.write(90); // Mueve el servo a 90 grados
-      delay(1000);               // Espera 1 segundo
-      servoIntermedia.write(0);   // Vuelve a la posición inicial
+    else if (comando == 'I') { // 'I' para INTERMEDIA
+      Serial.println("Recibido: INTERMEDIA. Moviendo servo 2...");
+      servoIntermedia.write(POS_DESVIO);
+      delay(1000); // Mantiene la posición por 1 segundo
+      servoIntermedia.write(POS_REPOSO);
     }
-    // Si recibe 'M' (Madura), no hacemos nada, la manzana sigue derecho.
+    // Si el comando es 'M' (Madura), no hace nada.
+    // La manzana sigue de frente y cae en la última caja.
   }
 }
